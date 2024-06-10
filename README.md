@@ -4,7 +4,37 @@ Python scripts and Docker container to export the Verifier Alliance PostgreSQL d
 
 Warning: The script likely has some memory leak issues and needs some refinement. Still, does the job.
 
+## Requirements
+
+- Python 3
+
+## Installation
+
+Create a virtual environment:
+
+```
+python -m venv venv
+```
+
+Activate the virtual environment:
+
+```
+source venv/bin/activate
+```
+
+Install dependencies:
+
+```
+pip install -r requirements.txt
+```
+
 ## Usage
+
+Run the script with:
+
+```
+python main.py
+```
 
 The script takes some additional env vars for debugging purposes:
 
