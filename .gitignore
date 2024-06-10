@@ -1,0 +1,6 @@
+venv
+debug.log
+*.parquet
+*.log
+.env
+.DS_Store
