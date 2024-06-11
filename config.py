@@ -76,7 +76,7 @@ tables_config = [
             'runtime_values': 'string',
             'runtime_transformations': 'string'
         },
-        'chunk_size': 10000,
+        'chunk_size': 100000,
         'num_chunks_per_file': 10
     }
 ]
