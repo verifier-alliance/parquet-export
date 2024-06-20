@@ -104,19 +104,12 @@ The script also generates a `manifest.json` that contains a timestamp when the d
 
 Build the image:
 
-````
-
+```
 docker build --tag=kuzdogan/test-parquet-linux --platform=linux/amd64 .
-
 ```
 
 Publish:
 
 ```
-
 docker push kuzdogan/test-parquet-linux
-
 ```
-
-```
-````
