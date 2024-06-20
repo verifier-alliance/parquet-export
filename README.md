@@ -76,7 +76,7 @@ The files will be named `verified_contracts_0_100000_zstd.parquet` and `verified
 
 The script also generates a `manifest.json` that contains a timestamp when the dump is created, and the list of files to access them in the S3 bucket.
 
-````json
+```json
 {
   "timestamp": 1718042395518,
   "dateStr": "2024-06-10T17:59:55.518972Z",
@@ -95,7 +95,8 @@ The script also generates a `manifest.json` that contains a timestamp when the d
     "compiled_contracts": [...],
     "verified_contracts": [...]
   }
-}```
+}
+```
 
 ## Docker
 
@@ -116,3 +117,4 @@ docker push kuzdogan/test-parquet-linux
 ```
 
 ```
+````
