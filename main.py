@@ -191,6 +191,7 @@ def fetch_and_write(table_config, engine):
             gc.collect()  # Trigger garbage collection
             chunk_counter += 1
 
+            # If the number of chunks per file is reached, close the writer and upload the file
             if chunk_counter >= num_chunks_per_file:
                 writer.close()
                 logger.info(f"Written {output_file}")
@@ -210,10 +211,13 @@ def fetch_and_write(table_config, engine):
 
             start_time = time.time()
 
-        # Close the writer if there are remaining chunks
+        # Finally write the final file if there are no remaining chunks
         if writer is not None:
             writer.close()
             logger.info(f"Written {output_file}")
+            # Append the file to the uploaded files list to be written to the manifest.json
+            if table_name not in uploaded_files:
+                uploaded_files[table_name] = []
             # Upload the file to S3
             object_name = f"{table_name}/{output_file}"
             upload_to_s3(output_file, os.getenv('S3_BUCKET_NAME'), object_name)
