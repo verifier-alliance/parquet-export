@@ -24,9 +24,13 @@ uploaded_files = {}
 
 compression = 'zstd'
 
+# Determine the logging level
+debug_env_var = os.getenv("DEBUG")
+logging_level = logging.DEBUG if debug_env_var else logging.INFO
+
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging_level,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.StreamHandler()
@@ -34,7 +38,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
-debug_env_var = os.getenv("DEBUG")
 logger.info(f"DEBUG environment variable: {debug_env_var}")
 
 
@@ -117,14 +120,21 @@ def process_df(df, dtypes):
             df[col] = df[col].dt.tz_convert('UTC').dt.tz_localize(None)
     for col in df.columns:
         if col in dtypes:
-            if dtypes[col] == 'bytes':
+            dtype = dtypes[col]
+            if dtype == 'bytes':
                 df[col] = df[col].apply(convert_memoryview_to_bytes)
+            elif dtype == 'json': # "json" is not a numpy/pandas datatype but we want to preserve the original JSON and not convert it to Python object notation (e.g. with True instead of true). See https://github.com/verifier-alliance/parquet-export/issues/1
+                df[col] = df[col].apply(json.dumps)
+                dtype = 'string' # change it to "string"
             else:
-                df[col] = df[col].astype(dtypes[col])
-            df[col] = df[col].astype(pd.UInt16Dtype() if dtypes[col] == 'UInt16' else dtypes[col])
+                df[col] = df[col].astype(dtype)
+            df[col] = df[col].astype(pd.UInt16Dtype() if dtype == 'UInt16' else dtype)
     return df
 
 def upload_to_s3(file_path, bucket_name, object_name):
+    if os.getenv("DEBUG"):
+        logger.debug("DEBUG: NOT uploading to S3 in DEBUG mode")
+        return
     s3_client = boto3.client(
         's3',
         endpoint_url=os.getenv('S3_ENDPOINT_URL'),
@@ -145,6 +155,11 @@ def fetch_and_write(table_config, engine):
     table_name = table_config['name']
     dtypes = table_config['datatypes']
     chunk_size = table_config['chunk_size']
+    if os.getenv('DEBUG'):
+        logger.debug(f"DEBUG: Setting chunk_size to 1/100 of {chunk_size} = {chunk_size // 100}")
+        chunk_size = chunk_size // 100
+
+    compression = table_config.get('compression', None)
     num_chunks_per_file = table_config['num_chunks_per_file']
     rows_per_file = chunk_size * num_chunks_per_file
     chunk_counter = 0
@@ -167,6 +182,7 @@ def fetch_and_write(table_config, engine):
         for chunk_dataframe in pd.read_sql_query(
             query, connection, chunksize=chunk_size):
             if os.getenv('DEBUG') and file_counter > 0:
+                logger.debug(f"DEBUG: Breaking after writing 1 file")
                 break
             end_time = time.time()
             logger.info(f"Retrieved {chunk_dataframe.shape[0]} rows chunk in {end_time - start_time:.2f} seconds")

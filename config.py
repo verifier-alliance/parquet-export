@@ -1,4 +1,5 @@
-# No need to set byte types because it's inferred from the data
+# Setting byte types to object as it's inferred from the data
+# "json" is not a numpy/pandas datatype but we handle it in our script.
 
 tables_config = [
     {
@@ -48,13 +49,13 @@ tables_config = [
             'language': 'string',
             'name': 'string',
             'fully_qualified_name': 'string',
-            'sources': 'string',
-            'compiler_settings': 'string',
-            'compilation_artifacts': 'string',
+            'sources': 'json',
+            'compiler_settings': 'json',
+            'compilation_artifacts': 'json',
             'creation_code_hash': 'object',
-            'creation_code_artifacts': 'string',
+            'creation_code_artifacts': 'json',
             'runtime_code_hash': 'object',
-            'runtime_code_artifacts': 'string'
+            'runtime_code_artifacts': 'json'
         },
         'chunk_size': 1000,
         'num_chunks_per_file': 10
@@ -70,11 +71,11 @@ tables_config = [
             'deployment_id': 'string',
             'compilation_id': 'string',
             'creation_match': 'bool',
-            'creation_values': 'string',
-            'creation_transformations': 'string',
+            'creation_values': 'json',
+            'creation_transformations': 'json',
             'runtime_match': 'bool',
-            'runtime_values': 'string',
-            'runtime_transformations': 'string'
+            'runtime_values': 'json',
+            'runtime_transformations': 'json'
         },
         'chunk_size': 100000,
         'num_chunks_per_file': 10
