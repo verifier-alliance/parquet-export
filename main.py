@@ -181,6 +181,7 @@ def fetch_and_write(table_config, engine):
             gc.collect()  # Trigger garbage collection
 
             if writer is None:
+                # file name: contracts_0_10000_zstd.parquet, contracts_10000_20000_zstd.parquet, etc.
                 output_file = get_output_file(f"{table_name}_{file_counter * rows_per_file}_{(file_counter + 1) * rows_per_file}", compression)
                 writer = pq.ParquetWriter(output_file, chunk_table.schema, compression=compression)
 
@@ -218,6 +219,8 @@ def fetch_and_write(table_config, engine):
             # Append the file to the uploaded files list to be written to the manifest.json
             if table_name not in uploaded_files:
                 uploaded_files[table_name] = []
+            uploaded_files[table_name].append(object_name)
+            
             # Upload the file to S3
             object_name = f"{table_name}/{output_file}"
             upload_to_s3(output_file, os.getenv('S3_BUCKET_NAME'), object_name)
