@@ -232,14 +232,16 @@ def fetch_and_write(table_config, engine):
         if writer is not None:
             writer.close()
             logger.info(f"Written {output_file}")
-            # Append the file to the uploaded files list to be written to the manifest.json
-            if table_name not in uploaded_files:
-                uploaded_files[table_name] = []
-            uploaded_files[table_name].append(object_name)
             
             # Upload the file to S3
             object_name = f"{table_name}/{output_file}"
             upload_to_s3(output_file, os.getenv('S3_BUCKET_NAME'), object_name)
+            
+            # Append the file to the uploaded files list to be written to the manifest.json
+            if table_name not in uploaded_files:
+                uploaded_files[table_name] = []
+            uploaded_files[table_name].append(object_name)
+
 
 if __name__ == "__main__":
     logger.info("Creating engine for database")
