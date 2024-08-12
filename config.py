@@ -6,7 +6,12 @@ tables_config = [
         'name': 'code',
         'datatypes': {
             'code_hash': 'object',
-            'code': 'object'
+            'code': 'object',
+            'code_hash_keccak': 'object',
+            'created_at': 'datetime64[ns]',
+            'updated_at': 'datetime64[ns]',
+            'created_by': 'string',
+            'updated_by': 'string'
         },
         'chunk_size': 10000,
         'num_chunks_per_file': 10
@@ -16,7 +21,11 @@ tables_config = [
         'datatypes': {
             'id': 'string',
             'creation_code_hash': 'object',
-            'runtime_code_hash': 'object'
+            'runtime_code_hash': 'object',
+            'created_at': 'datetime64[ns]',
+            'updated_at': 'datetime64[ns]',
+            'created_by': 'string',
+            'updated_by': 'string'
         },
         'chunk_size': 100000,
         'num_chunks_per_file': 10
@@ -31,7 +40,11 @@ tables_config = [
             'block_number': 'Int64',
             'transaction_index': 'Int32',
             'deployer': 'object',
-            'contract_id': 'string'
+            'contract_id': 'string',
+            'created_at': 'datetime64[ns]',
+            'updated_at': 'datetime64[ns]',
+            'created_by': 'string',
+            'updated_by': 'string'
         },
         'chunk_size': 100000,
         'num_chunks_per_file': 10
@@ -75,7 +88,9 @@ tables_config = [
             'creation_transformations': 'json',
             'runtime_match': 'bool',
             'runtime_values': 'json',
-            'runtime_transformations': 'json'
+            'runtime_transformations': 'json',
+            'runtime_metadata_match': 'bool',
+            'creation_metadata_match': 'bool'
         },
         'chunk_size': 100000,
         'num_chunks_per_file': 10
