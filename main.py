@@ -12,7 +12,6 @@ import logging
 import pg8000
 import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError
-import gc
 import json
 from datetime import datetime 
 
@@ -132,6 +131,7 @@ def process_df(df, dtypes):
     return df
 
 def upload_to_s3(file_path, bucket_name, object_name):
+    logger.info(f"Uploading {object_name} to S3")
     if os.getenv("DEBUG"):
         logger.debug("DEBUG: NOT uploading to S3 in DEBUG mode")
         return
@@ -144,6 +144,8 @@ def upload_to_s3(file_path, bucket_name, object_name):
     try:
         s3_client.upload_file(file_path, bucket_name, object_name)
         logger.info(f"Successfully uploaded {file_path} to {bucket_name}/{object_name}")
+        os.remove(file_path)
+        logger.info(f"Deleted local file {file_path}")
     except FileNotFoundError:
         logger.error(f"The file {file_path} was not found")
     except NoCredentialsError:
@@ -168,8 +170,7 @@ def fetch_and_write(table_config, engine):
 
     # Use stream_results=True to fetch data in chunks
     logger.info(f"Connecting to the DB for the table: {table_name}")
-    with engine.connect().execution_options(
-        stream_results=True) as connection:
+    with engine.connect().execution_options(stream_results=True) as connection:
 
 
         query = text(f"SELECT * FROM {table_name}")
@@ -179,8 +180,7 @@ def fetch_and_write(table_config, engine):
 
         start_time = time.time()
 
-        for chunk_dataframe in pd.read_sql_query(
-            query, connection, chunksize=chunk_size):
+        for chunk_dataframe in pd.read_sql_query(query, connection, chunksize=chunk_size):
             if os.getenv('DEBUG') and file_counter > 0:
                 logger.debug(f"DEBUG: Breaking after writing 1 file")
                 break
@@ -188,13 +188,10 @@ def fetch_and_write(table_config, engine):
             logger.info(f"Retrieved {chunk_dataframe.shape[0]} rows chunk in {end_time - start_time:.2f} seconds")
 
             df = process_df(chunk_dataframe, dtypes)  # Process the dataframe to apply dtype conversion
-            del chunk_dataframe
-            gc.collect()  # Trigger garbage collection
+
             logger.info(f"Processed chunk {chunk_counter} of file {file_counter}")
             logger.info(f"DataFrame size: {df.memory_usage(deep=True).sum() / (1024 * 1024):.2f} MB")
             chunk_table = pa.Table.from_pandas(df) # Convert the dataframe to a PyArrow table
-            del df
-            gc.collect()  # Trigger garbage collection
 
             if writer is None:
                 # file name: contracts_0_10000_zstd.parquet, contracts_10000_20000_zstd.parquet, etc.
@@ -204,19 +201,18 @@ def fetch_and_write(table_config, engine):
             logger.info(f"Writing chunk {chunk_counter} of file {file_counter} to {output_file}")
 
             writer.write_table(chunk_table)
-            del chunk_table
-            gc.collect()  # Trigger garbage collection
+
             chunk_counter += 1
 
             # If the number of chunks per file is reached, close the writer and upload the file
             if chunk_counter >= num_chunks_per_file:
                 writer.close()
                 logger.info(f"Written {output_file}")
+
                 # Upload the file to S3
                 object_name = f"{table_name}/{output_file}"
-                logger.info(f"Uploading {object_name} to S3")
                 upload_to_s3(output_file, os.getenv('S3_BUCKET_NAME'), object_name)
-                logger.info(f"Uploaded {object_name} to S3")
+
                 # Append the file to the uploaded files list to be written to the manifest.json
                 if table_name not in uploaded_files:
                     uploaded_files[table_name] = []
@@ -228,7 +224,7 @@ def fetch_and_write(table_config, engine):
 
             start_time = time.time()
 
-        # Finally write the final file if there are no remaining chunks
+        # Finally write the last remaining file if there are no remaining chunks
         if writer is not None:
             writer.close()
             logger.info(f"Written {output_file}")
