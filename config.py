@@ -58,7 +58,7 @@ tables_config = [
             'runtime_code_artifacts': 'json'
         },
         'chunk_size': 1000,
-        'num_chunks_per_file': 10
+        'num_chunks_per_file': 5
     },
     {
         'name': 'verified_contracts',
