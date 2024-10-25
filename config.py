@@ -62,7 +62,6 @@ tables_config = [
             'language': 'string',
             'name': 'string',
             'fully_qualified_name': 'string',
-            'sources': 'json',
             'compiler_settings': 'json',
             'compilation_artifacts': 'json',
             'creation_code_hash': 'object',
@@ -71,7 +70,32 @@ tables_config = [
             'runtime_code_artifacts': 'json'
         },
         'chunk_size': 1000,
-        'num_chunks_per_file': 5
+        'num_chunks_per_file': 10
+    },
+    {
+        'name': 'compiled_contracts_sources',
+        'datatypes': {
+            'id': 'string',
+            'compilation_id': 'string',
+            'source_hash': 'object',
+            'path': 'string'
+        },
+        'chunk_size': 100000,
+        'num_chunks_per_file': 10
+    },
+    {
+        'name': 'sources',
+        'datatypes': {
+            'source_hash': 'object',
+            'source_hash_keccak': 'object',
+            'content': 'string',
+            'created_at': 'datetime64[ns]',
+            'updated_at': 'datetime64[ns]',
+            'created_by': 'string',
+            'updated_by': 'string'
+        },
+        'chunk_size': 1000,
+        'num_chunks_per_file': 10
     },
     {
         'name': 'verified_contracts',
