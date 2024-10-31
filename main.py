@@ -176,6 +176,7 @@ def upload_to_s3(file_path, bucket_name, object_name):
         logger.error("Incomplete credentials provided")
 
 def fetch_and_write(table_config, engine):
+    postgres_schema_name = os.getenv('DB_SCHEMA')
     table_name = table_config['name']
     dtypes = table_config['datatypes']
     schema = get_pyarrow_schema(dtypes)
@@ -196,9 +197,9 @@ def fetch_and_write(table_config, engine):
     with engine.connect().execution_options(stream_results=True) as connection:
 
 
-        query = text(f"SELECT * FROM {table_name}")
+        query = text(f"SELECT * FROM {postgres_schema_name}.{table_name}")
         if os.getenv('DEBUG_OFFSET'):
-            query = text(f"SELECT * FROM {table_name} OFFSET {os.getenv('DEBUG_OFFSET')}")
+            query = text(f"SELECT * FROM {postgres_schema_name}.{table_name} OFFSET {os.getenv('DEBUG_OFFSET')}")
         logger.info(f"Executing query for table {table_name}: {query}")
 
         start_time = time.time()
