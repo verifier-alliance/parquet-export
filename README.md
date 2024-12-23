@@ -4,7 +4,7 @@ Python scripts and Docker container to export the Verifier Alliance PostgreSQL d
 
 Warning: The script likely has some memory leak issues and needs some refinement. Still, does the job.
 
-~~The latest export is available on [Cloudflare R2](https://pub-f4b5a1306ebd42a3b1289ab59da1d9bf.r2.dev/manifest.json).~~ The database wit h the new v1 schema is still in the making. We'll announce when these new exports are publicly available. Bear in mind the data is not production-ready and contains many mistakes. We've laid out some of the problems [in this document](https://efdn.notion.site/VerA-DB-Problems-and-Changes-9a6873b2c0cc4b9c9cb04c82f6a0745b?pvs=4)
+~~The latest export is available on [Cloudflare R2](https://pub-f4b5a1306ebd42a3b1289ab59da1d9bf.r2.dev/manifest.json).~~ The database with the new v1 schema is still in the making. We'll announce when these new exports are publicly available. Bear in mind the data is not production-ready and contains many mistakes. We've laid out some of the problems [in this document](https://efdn.notion.site/VerA-DB-Problems-and-Changes-9a6873b2c0cc4b9c9cb04c82f6a0745b?pvs=4)
 
 ## Requirements
 
