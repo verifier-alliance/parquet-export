@@ -100,6 +100,7 @@ def convert_memoryview_to_bytes(data):
     return data.tobytes() if isinstance(data, memoryview) else data
 
 def write_manifest():
+    """Write manifest.json locally (will be uploaded to GCS separately)"""
     timestamp = int(datetime.now().timestamp() * 1000)
     date_str = datetime.now().isoformat() + "Z"
     manifest = {
@@ -110,6 +111,39 @@ def write_manifest():
     with open('manifest.json', 'w') as f:
         json.dump(manifest, f, indent=2)
     logger.info("Manifest file written successfully.")
+
+def write_manifest_to_gcs():
+    """Write manifest.json directly to GCS without local file (or locally in DEBUG mode)"""
+    if os.getenv("DEBUG"):
+        # In DEBUG mode, write locally and skip upload
+        write_manifest()
+        logger.debug("DEBUG: Manifest written locally, skipping GCS upload")
+        return
+
+    timestamp = int(datetime.now().timestamp() * 1000)
+    date_str = datetime.now().isoformat() + "Z"
+    manifest = {
+        "timestamp": timestamp,
+        "dateStr": date_str,
+        "files": uploaded_files
+    }
+
+    try:
+        # Write directly to GCS
+        client = storage.Client()
+        bucket = client.bucket(os.getenv('GCS_BUCKET_NAME'))
+        blob = bucket.blob('manifest.json')
+
+        # Upload as string
+        blob.upload_from_string(
+            json.dumps(manifest, indent=2),
+            content_type='application/json'
+        )
+        logger.info(f"Manifest written directly to gs://{os.getenv('GCS_BUCKET_NAME')}/manifest.json")
+
+    except Exception as e:
+        logger.error(f"Error writing manifest to GCS: {e}")
+        raise
 
 
 def process_df(df, dtypes):
@@ -152,6 +186,7 @@ def get_pyarrow_schema(dtypes):
     return pa.schema([pa.field(col, get_pyarrow_type(dt)) for col, dt in dtypes.items()])
 
 def upload_to_gcs(file_path, bucket_name, object_name):
+    """Upload a local file to GCS (used only for manifest.json and DEBUG mode)"""
     logger.info(f"Uploading {object_name} to GCS")
     if os.getenv("DEBUG"):
         logger.debug("DEBUG: NOT uploading to GCS in DEBUG mode")
@@ -175,6 +210,42 @@ def upload_to_gcs(file_path, bucket_name, object_name):
         logger.error(f"Error uploading to GCS: {e}")
         raise
 
+def create_parquet_writer(bucket_name, object_name, schema, compression):
+    """
+    Create a ParquetWriter that writes directly to GCS (or locally in DEBUG mode).
+
+    Returns:
+        tuple: (writer, local_file_path)
+            - writer: PyArrow ParquetWriter object
+            - local_file_path: Path to local file if in DEBUG mode, None otherwise
+    """
+    if os.getenv("DEBUG"):
+        # In debug mode, write to local filesystem
+        local_file = object_name.split('/')[-1]  # Get filename from object path
+        logger.debug(f"DEBUG: Creating local writer for {local_file}")
+        writer = pq.ParquetWriter(local_file, schema, compression=compression)
+        return writer, local_file
+
+    # Production mode: stream directly to GCS
+    logger.info(f"Creating streaming writer to gs://{bucket_name}/{object_name}")
+    try:
+        # Initialize GCS client
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(object_name)
+
+        # Open blob as a writable file-like object
+        gcs_file = blob.open('wb')
+
+        # Create ParquetWriter with the GCS file object
+        writer = pq.ParquetWriter(gcs_file, schema, compression=compression)
+
+        return writer, None  # No local file in production mode
+
+    except Exception as e:
+        logger.error(f"Error creating GCS writer: {e}")
+        raise
+
 def fetch_and_write(table_config, engine):
     postgres_schema_name = os.getenv('DB_SCHEMA')
     table_name = table_config['name']
@@ -191,11 +262,12 @@ def fetch_and_write(table_config, engine):
     chunk_counter = 0
     file_counter = 0
     writer = None
+    local_file = None
+    object_name = None
 
     # Use stream_results=True to fetch data in chunks
     logger.info(f"Connecting to the DB for the table: {table_name}")
     with engine.connect().execution_options(stream_results=True) as connection:
-
 
         query = text(f"SELECT * FROM {postgres_schema_name}.{table_name}")
         if os.getenv('DEBUG_OFFSET'):
@@ -218,24 +290,35 @@ def fetch_and_write(table_config, engine):
             chunk_table = pa.Table.from_pandas(df, schema=schema) # Convert the dataframe to a PyArrow table
 
             if writer is None:
-                # file name: contracts_0_10000_zstd.parquet, contracts_10000_20000_zstd.parquet, etc.
-                output_file = get_output_file(f"{table_name}_{file_counter * rows_per_file}_{(file_counter + 1) * rows_per_file}", compression)
-                writer = pq.ParquetWriter(output_file, chunk_table.schema, compression=compression)
+                # Create object name: table_name/contracts_0_10000_zstd.parquet, etc.
+                filename = get_output_file(f"{table_name}_{file_counter * rows_per_file}_{(file_counter + 1) * rows_per_file}", compression)
+                object_name = f"{table_name}/{filename}"
 
-            logger.info(f"Writing chunk {chunk_counter} of file {file_counter} to {output_file}")
+                # Create writer that streams directly to GCS (or local file in DEBUG mode)
+                writer, local_file = create_parquet_writer(
+                    os.getenv('GCS_BUCKET_NAME'),
+                    object_name,
+                    chunk_table.schema,
+                    compression
+                )
+
+            logger.info(f"Writing chunk {chunk_counter} of file {file_counter}")
 
             writer.write_table(chunk_table)
 
             chunk_counter += 1
 
-            # If the number of chunks per file is reached, close the writer and upload the file
+            # If the number of chunks per file is reached, close the writer
             if chunk_counter >= num_chunks_per_file:
                 writer.close()
-                logger.info(f"Written {output_file}")
 
-                # Upload the file to GCS
-                object_name = f"{table_name}/{output_file}"
-                upload_to_gcs(output_file, os.getenv('GCS_BUCKET_NAME'), object_name)
+                if local_file:
+                    # DEBUG mode: upload the local file
+                    logger.info(f"Written local file {local_file}")
+                    upload_to_gcs(local_file, os.getenv('GCS_BUCKET_NAME'), object_name)
+                else:
+                    # Production mode: already streamed to GCS
+                    logger.info(f"Streamed directly to gs://{os.getenv('GCS_BUCKET_NAME')}/{object_name}")
 
                 # Append the file to the uploaded files list to be written to the manifest.json
                 if table_name not in uploaded_files:
@@ -244,19 +327,23 @@ def fetch_and_write(table_config, engine):
 
                 file_counter += 1
                 chunk_counter = 0
-                writer = None  # Reset the writer for the next file
+                writer = None
+                local_file = None
 
             start_time = time.time()
 
-        # Finally write the last remaining file if there are no remaining chunks
+        # Finally write the last remaining file if there are remaining chunks
         if writer is not None:
             writer.close()
-            logger.info(f"Written {output_file}")
 
-            # Upload the file to GCS
-            object_name = f"{table_name}/{output_file}"
-            upload_to_gcs(output_file, os.getenv('GCS_BUCKET_NAME'), object_name)
-            
+            if local_file:
+                # DEBUG mode: upload the local file
+                logger.info(f"Written local file {local_file}")
+                upload_to_gcs(local_file, os.getenv('GCS_BUCKET_NAME'), object_name)
+            else:
+                # Production mode: already streamed to GCS
+                logger.info(f"Streamed directly to gs://{os.getenv('GCS_BUCKET_NAME')}/{object_name}")
+
             # Append the file to the uploaded files list to be written to the manifest.json
             if table_name not in uploaded_files:
                 uploaded_files[table_name] = []
@@ -278,5 +365,6 @@ if __name__ == "__main__":
         for table_config in tables_config:
             logger.info(f"Fetching and writing table: {table_config['name']}")
             fetch_and_write(table_config, engine)
-    write_manifest()  # Write the manifest file after processing all tables
-    upload_to_gcs('manifest.json', os.getenv('GCS_BUCKET_NAME'), 'manifest.json')
+
+    # Write manifest directly to GCS (or locally in DEBUG mode)
+    write_manifest_to_gcs()
