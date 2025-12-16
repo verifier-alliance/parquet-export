@@ -16,7 +16,7 @@ jmespath==1.0.1
 multidict==6.0.5
 numpy==1.26.4
 pandas==2.2.2
-pg8000==1.31.2
+pg8000==1.31.5
 psycopg2==2.9.9
 pyarrow==16.1.0
 pyasn1==0.6.0
