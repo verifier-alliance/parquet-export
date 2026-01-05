@@ -2,13 +2,21 @@
 
 Python scripts and Docker container to export the Verifier Alliance PostgreSQL database in Parquet format and upload it to Google Cloud Storage.
 
+The export script has undergone a redesign which made it append-only. The new export format is referred to as "v2". See https://github.com/argotorg/sourcify/issues/2441 for details of the redesign.
+
+## Downloading the public dataset
+
 The latest export is publicly available at [https://export.verifieralliance.org](https://export.verifieralliance.org).
 
-## Requirements
+Please refer to the [VerA docs](https://verifieralliance.org/docs/download) for instructions on how to download and use the Parquet files.
+
+## Running the Export Script
+
+### Requirements
 
 - Python 3
 
-## Installation
+### Installation
 
 Create a virtual environment:
 
@@ -28,13 +36,24 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-## Usage
+### Usage
 
 Run the script with:
 
 ```
 python main.py
 ```
+
+The script automatically detects existing files in GCS and performs **append-only exports**:
+
+- **First run**: Exports all data from the database
+- **Subsequent runs**:
+  - Finds the newest file in GCS for each table
+  - Downloads it and reads the first row to determine the checkpoint
+  - Regenerates the last file completely (in case it was incomplete)
+  - Exports only new data that arrived since that checkpoint
+
+### Debugging
 
 The script takes some additional env vars for debugging purposes:
 
@@ -54,13 +73,23 @@ export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
 
 In Cloud Run, authentication is automatic via Workload Identity.
 
-The [config.py](./config.py) file contains the configuration for each database table about the chunk sizes and number of chunks per file, and the datatypes for each column in the table.
+### Configuration
+
+The [config.py](./config.py) file contains the configuration for each database table including:
+
+- `order_by`: The column to use for ordering data during export (typically `created_at`). Data is sorted by this column, with `primary_key` as a secondary sort for deterministic ordering.
+- `primary_key`: The primary key column name (used as tie-breaker for append-only ordering)
+- `datatypes`: Column type mappings for proper Parquet schema generation
+- `chunk_size`: Number of rows to fetch per database query
+- `num_chunks_per_file`: Number of chunks to write per Parquet file
 
 Example:
 
-```js
-  {
+```python
+{
     'name': 'verified_contracts',
+    'primary_key': 'id',
+    'order_by': 'created_at',
     'datatypes': {
         'id': 'Int64',
         'created_at': 'datetime64[ns]',
@@ -70,46 +99,26 @@ Example:
         'deployment_id': 'string',
         'compilation_id': 'string',
         'creation_match': 'bool',
-        'creation_values': 'string',
-        'creation_transformations': 'string',
+        'creation_values': 'json',
+        'creation_transformations': 'json',
         'runtime_match': 'bool',
-        'runtime_values': 'string',
-        'runtime_transformations': 'string'
+        'runtime_values': 'json',
+        'runtime_transformations': 'json',
+        'runtime_metadata_match': 'bool',
+        'creation_metadata_match': 'bool'
     },
-    'chunk_size': 10000,
+    'chunk_size': 100000,
     'num_chunks_per_file': 10
-  }
-```
-
-This config gives `10,000 * 10 = 100,000` rows per file.
-
-The files will be named `verified_contracts_0_100000_zstd.parquet` and `verified_contracts_100000_200000_zstd.parquet` etc. (`zstd` is the compression algorithm).
-
-The script also generates a `manifest.json` that contains a timestamp when the dump is created, and the list of files uploaded to Google Cloud Storage.
-
-```json
-{
-  "timestamp": 1718042395518,
-  "dateStr": "2024-06-10T17:59:55.518972Z",
-  "files": {
-    "code": [
-      "code/code_0_100000_zstd.parquet",
-      "code/code_100000_200000_zstd.parquet",
-      "code/code_200000_300000_zstd.parquet",
-      "code/code_300000_400000_zstd.parquet",
-      "code/code_400000_500000_zstd.parquet",
-      "code/code_500000_600000_zstd.parquet",
-      "code/code_600000_700000_zstd.parquet",
-      "code/code_700000_800000_zstd.parquet"
-    ],
-    "contract_deployments": [...],
-    "compiled_contracts": [...],
-    "verified_contracts": [...]
-  }
 }
 ```
 
-## Docker
+This config gives `100,000 * 10 = 1,000,000` rows per file.
+
+The files will be named `verified_contracts_0_1000000.parquet`, `verified_contracts_1000000_2000000.parquet`, etc.
+
+Files are stored in GCS under the `v2/{table_name}/` prefix and compressed using zstd.
+
+### Docker
 
 Build the image:
 
@@ -122,3 +131,13 @@ Publish:
 ```
 docker push kuzdogan/test-parquet-linux
 ```
+
+## Metadata
+
+Previously, the export script generated a `manifest.json` file containing metadata about the export. This is no longer generated, as we now rely on the Google Cloud Storage API for metadata.
+
+For example, this API endpoint lists all available export v2 files with their metadata in XML:
+
+https://export.test.verifieralliance.org/?prefix=v2/
+
+This API is compatible with the AWS S3 API. Documentation can be found here: https://docs.cloud.google.com/storage/docs/xml-api/get-bucket-list

@@ -12,13 +12,9 @@ import time
 import logging
 import pg8000
 import json
-from datetime import datetime 
 
 # Load environment variables from .env file
 load_dotenv()
-
-# Global dictionary to store uploaded files. To be written to the manifest.json
-uploaded_files = {}
 
 compression = 'zstd'
 
@@ -52,7 +48,7 @@ def get_google_conn() -> pg8000.dbapi.Connection:
             "pg8000",
             user=os.getenv('DB_USER'),
             password=os.getenv('DB_PASSWORD'),
-            db=os.getenv('DB_NAME'), 
+            db=os.getenv('DB_NAME'),
             ip_type=IPTypes.PUBLIC
         )
         logger.info("Successfully created Google Cloud SQL connection")
@@ -90,27 +86,11 @@ def create_sqlalchemy_engine() -> Engine:
         engine = create_engine(connection_string)
     return engine
 
-def get_output_file(table_name, compression):
-    if compression:
-        return f"{table_name}_{compression}.parquet"
-    else:
-        return f"{table_name}.parquet"
+def get_output_file(file_name):
+    return f"{file_name}.parquet"
 
 def convert_memoryview_to_bytes(data):
     return data.tobytes() if isinstance(data, memoryview) else data
-
-def write_manifest():
-    timestamp = int(datetime.now().timestamp() * 1000)
-    date_str = datetime.now().isoformat() + "Z"
-    manifest = {
-        "timestamp": timestamp,
-        "dateStr": date_str,
-        "files": uploaded_files
-    }
-    with open('manifest.json', 'w') as f:
-        json.dump(manifest, f, indent=2)
-    logger.info("Manifest file written successfully.")
-
 
 def process_df(df, dtypes):
     for col in ['created_at', 'updated_at']:
@@ -152,6 +132,7 @@ def get_pyarrow_schema(dtypes):
     return pa.schema([pa.field(col, get_pyarrow_type(dt)) for col, dt in dtypes.items()])
 
 def upload_to_gcs(file_path, bucket_name, object_name):
+    object_name = f'v2/{object_name}'
     logger.info(f"Uploading {object_name} to GCS")
     if os.getenv("DEBUG"):
         logger.debug("DEBUG: NOT uploading to GCS in DEBUG mode")
@@ -175,9 +156,82 @@ def upload_to_gcs(file_path, bucket_name, object_name):
         logger.error(f"Error uploading to GCS: {e}")
         raise
 
+def get_newest_file_from_gcs(table_name, bucket_name):
+    """
+    Find the newest file for a given table in GCS based on last modified timestamp.
+    Returns blob_name (full path) or None if no files exist.
+    """
+    logger.info(f"Searching for newest file in GCS for table: {table_name}")
+
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+
+        # List all blobs in the table's directory (under v2/)
+        prefix = f"v2/{table_name}/"
+        blobs = list(bucket.list_blobs(prefix=prefix))
+
+        if not blobs:
+            logger.info(f"No existing files found in GCS for table {table_name}")
+            return None
+
+        # Find the blob with the latest updated timestamp
+        newest_blob = max(blobs, key=lambda b: b.updated)
+        logger.info(f"Found newest file: {newest_blob.name} (updated: {newest_blob.updated})")
+
+        return newest_blob.name
+
+    except Exception as e:
+        logger.error(f"Error finding newest file in GCS: {e}")
+        raise
+
+def download_and_read_first_row(blob_name, bucket_name, order_by_column, primary_key):
+    """
+    Download a Parquet file from GCS, read the first row to extract (order_by_value, primary_key_value),
+    then delete the local file. This determines where the file starts for regenerating it.
+    Returns (order_by_value, primary_key_value) tuple.
+    """
+    logger.info(f"Downloading {blob_name} from GCS to read first row")
+    local_file = f"temp_{blob_name.split('/')[-1]}"
+
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+
+        # Download to a temporary local file
+        blob.download_to_filename(local_file)
+        logger.info(f"Downloaded {blob_name} to {local_file}")
+
+        # Read the Parquet file
+        table = pq.read_table(local_file)
+        df = table.to_pandas()
+
+        # Get the first row to determine where this file starts (for regenerating the entire file)
+        first_row = df.iloc[0]
+        order_by_value = first_row[order_by_column]
+        primary_key_value = first_row[primary_key]
+
+        logger.info(f"First row: {order_by_column}={order_by_value}, {primary_key}={primary_key_value}")
+
+        # Delete the temporary file
+        os.remove(local_file)
+        logger.info(f"Deleted temporary file {local_file}")
+
+        return order_by_value, primary_key_value
+
+    except Exception as e:
+        logger.error(f"Error downloading and reading file from GCS: {e}")
+        # Clean up temp file if it exists
+        if os.path.exists(local_file):
+            os.remove(local_file)
+        raise
+
 def fetch_and_write(table_config, engine):
     postgres_schema_name = os.getenv('DB_SCHEMA')
     table_name = table_config['name']
+    primary_key = table_config['primary_key']
+    order_by_column = table_config['order_by']
     dtypes = table_config['datatypes']
     schema = get_pyarrow_schema(dtypes)
     chunk_size = table_config['chunk_size']
@@ -185,21 +239,62 @@ def fetch_and_write(table_config, engine):
         logger.debug(f"DEBUG: Setting chunk_size to 1/100 of {chunk_size} = {chunk_size // 100}")
         chunk_size = chunk_size // 100
 
-    compression = table_config.get('compression', None)
     num_chunks_per_file = table_config['num_chunks_per_file']
     rows_per_file = chunk_size * num_chunks_per_file
     chunk_counter = 0
     file_counter = 0
     writer = None
 
+    # Check for existing files in GCS to enable append-only export
+    bucket_name = os.getenv('GCS_BUCKET_NAME')
+    newest_blob_name = get_newest_file_from_gcs(table_name, bucket_name)
+
+    resume_from_order_by = None
+    resume_from_pk = None
+
+    if newest_blob_name:
+        # Extract the filename from the full blob path and parse it
+        # Format: table_name/table_name_start_end.parquet
+        newest_file_name = newest_blob_name.split('/')[-1]
+        parts = newest_file_name.replace(f"{table_name}_", "").replace(".parquet", "").split("_")
+        start_row = int(parts[0])
+        file_counter = start_row // rows_per_file
+
+        logger.info(f"Resuming from file: {newest_file_name}, file_counter: {file_counter}")
+
+        # Download and read the first row to get checkpoint
+        resume_from_order_by, resume_from_pk = download_and_read_first_row(newest_blob_name, bucket_name, order_by_column, primary_key)
+        logger.info(f"Resume checkpoint: {order_by_column}={resume_from_order_by}, {primary_key}={resume_from_pk}")
+
+    # Determine if primary key needs UUID casting (when dtype is 'string', it's a UUID in the database)
+    pk_is_uuid = dtypes.get(primary_key) == 'string'
+
     # Use stream_results=True to fetch data in chunks
     logger.info(f"Connecting to the DB for the table: {table_name}")
     with engine.connect().execution_options(stream_results=True) as connection:
 
+        # Build query with composite ordering and optional WHERE clause for resuming
+        if resume_from_order_by is not None:
+            if pk_is_uuid:
+                pk_comparison = f"{primary_key} >= CAST(:pk_value AS uuid)"
+            else:
+                pk_comparison = f"{primary_key} >= :pk_value"
 
-        query = text(f"SELECT * FROM {postgres_schema_name}.{table_name}")
+            # Query for append-only: WHERE (order_by_column > ?) OR (order_by_column = ? AND primary_key >= ?)
+            query = text(f"""
+                SELECT * FROM {postgres_schema_name}.{table_name}
+                WHERE ({order_by_column} > :order_by_value) OR ({order_by_column} = :order_by_value AND {pk_comparison})
+                ORDER BY {order_by_column} ASC, {primary_key} ASC
+            """)
+            query = query.bindparams(order_by_value=resume_from_order_by, pk_value=resume_from_pk)
+        else:
+            # Full export from the beginning
+            query = text(f"SELECT * FROM {postgres_schema_name}.{table_name} ORDER BY {order_by_column} ASC, {primary_key} ASC")
+
         if os.getenv('DEBUG_OFFSET'):
-            query = text(f"SELECT * FROM {postgres_schema_name}.{table_name} OFFSET {os.getenv('DEBUG_OFFSET')}")
+            # Override with debug offset if set
+            query = text(f"SELECT * FROM {postgres_schema_name}.{table_name} ORDER BY {order_by_column} ASC, {primary_key} ASC OFFSET {os.getenv('DEBUG_OFFSET')}")
+
         logger.info(f"Executing query for table {table_name}: {query}")
 
         start_time = time.time()
@@ -218,8 +313,8 @@ def fetch_and_write(table_config, engine):
             chunk_table = pa.Table.from_pandas(df, schema=schema) # Convert the dataframe to a PyArrow table
 
             if writer is None:
-                # file name: contracts_0_10000_zstd.parquet, contracts_10000_20000_zstd.parquet, etc.
-                output_file = get_output_file(f"{table_name}_{file_counter * rows_per_file}_{(file_counter + 1) * rows_per_file}", compression)
+                # file name: contracts_0_10000.parquet, contracts_10000_20000.parquet, etc.
+                output_file = get_output_file(f"{table_name}_{file_counter * rows_per_file}_{(file_counter + 1) * rows_per_file}")
                 writer = pq.ParquetWriter(output_file, chunk_table.schema, compression=compression)
 
             logger.info(f"Writing chunk {chunk_counter} of file {file_counter} to {output_file}")
@@ -237,11 +332,6 @@ def fetch_and_write(table_config, engine):
                 object_name = f"{table_name}/{output_file}"
                 upload_to_gcs(output_file, os.getenv('GCS_BUCKET_NAME'), object_name)
 
-                # Append the file to the uploaded files list to be written to the manifest.json
-                if table_name not in uploaded_files:
-                    uploaded_files[table_name] = []
-                uploaded_files[table_name].append(object_name)
-
                 file_counter += 1
                 chunk_counter = 0
                 writer = None  # Reset the writer for the next file
@@ -256,11 +346,6 @@ def fetch_and_write(table_config, engine):
             # Upload the file to GCS
             object_name = f"{table_name}/{output_file}"
             upload_to_gcs(output_file, os.getenv('GCS_BUCKET_NAME'), object_name)
-            
-            # Append the file to the uploaded files list to be written to the manifest.json
-            if table_name not in uploaded_files:
-                uploaded_files[table_name] = []
-            uploaded_files[table_name].append(object_name)
 
 
 if __name__ == "__main__":
@@ -278,5 +363,3 @@ if __name__ == "__main__":
         for table_config in tables_config:
             logger.info(f"Fetching and writing table: {table_config['name']}")
             fetch_and_write(table_config, engine)
-    write_manifest()  # Write the manifest file after processing all tables
-    upload_to_gcs('manifest.json', os.getenv('GCS_BUCKET_NAME'), 'manifest.json')
