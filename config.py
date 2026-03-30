@@ -75,7 +75,8 @@ tables_config = [
             'creation_code_hash': 'object',
             'creation_code_artifacts': 'json',
             'runtime_code_hash': 'object',
-            'runtime_code_artifacts': 'json'
+            'runtime_code_artifacts': 'json',
+            'additional_input': 'json'
         },
         'chunk_size': 1000,
         'num_chunks_per_file': 10
