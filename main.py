@@ -348,6 +348,78 @@ def fetch_and_write(table_config, engine):
             upload_to_gcs(output_file, os.getenv('GCS_BUCKET_NAME'), object_name)
 
 
+def write_stats_json(engine, bucket_name):
+    """
+    After all table exports complete, compute parquet sizes (from GCS) and
+    Postgres table/DB sizes, then upload a stats.json to v2/stats.json.
+    """
+    logger.info("Computing export stats for stats.json")
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        postgres_schema_name = os.getenv('DB_SCHEMA')
+
+        # --- Parquet sizes per table ---
+        parquet_tables = {}
+        parquet_total_bytes = 0
+        parquet_total_files = 0
+        for table_config in tables_config:
+            table_name = table_config['name']
+            blobs = list(bucket.list_blobs(prefix=f"v2/{table_name}/"))
+            table_bytes = sum(b.size for b in blobs)
+            table_files = len(blobs)
+            parquet_tables[table_name] = {"bytes": table_bytes, "fileCount": table_files}
+            parquet_total_bytes += table_bytes
+            parquet_total_files += table_files
+
+        # --- Database sizes per table + total ---
+        db_tables = {}
+        with engine.connect() as conn:
+            for table_config in tables_config:
+                table_name = table_config['name']
+                row = conn.execute(
+                    text(f"SELECT pg_total_relation_size('{postgres_schema_name}.{table_name}'::regclass)")
+                ).fetchone()
+                db_tables[table_name] = {"bytes": row[0]}
+
+            total_row = conn.execute(
+                text("SELECT pg_database_size(current_database())")
+            ).fetchone()
+            db_total_bytes = total_row[0]
+
+        from datetime import datetime, timezone
+        stats = {
+            "generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "schemaVersion": "v2",
+            "parquet": {
+                "totalBytes": parquet_total_bytes,
+                "fileCount": parquet_total_files,
+                "tables": parquet_tables,
+            },
+            "database": {
+                "totalBytes": db_total_bytes,
+                "tables": db_tables,
+            },
+        }
+
+        if os.getenv("DEBUG"):
+            logger.debug(f"DEBUG: NOT uploading stats.json in DEBUG mode. Stats: {json.dumps(stats, indent=2)}")
+            return
+
+        blob = bucket.blob("v2/stats.json")
+        blob.upload_from_string(
+            json.dumps(stats),
+            content_type="application/json",
+        )
+        blob.cache_control = "public, max-age=300"
+        blob.patch()
+        logger.info(f"Successfully uploaded v2/stats.json to gs://{bucket_name}/v2/stats.json")
+
+    except Exception as e:
+        logger.error(f"Error writing stats.json: {e}")
+        raise
+
+
 if __name__ == "__main__":
     logger.info("Creating engine for database")
     engine = create_sqlalchemy_engine()
@@ -363,3 +435,5 @@ if __name__ == "__main__":
         for table_config in tables_config:
             logger.info(f"Fetching and writing table: {table_config['name']}")
             fetch_and_write(table_config, engine)
+
+    write_stats_json(engine, os.getenv('GCS_BUCKET_NAME'))
