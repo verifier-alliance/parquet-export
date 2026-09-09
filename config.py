@@ -147,7 +147,7 @@ tables_config = [
             'created_at': 'datetime64[ns]',
             'updated_at': 'datetime64[ns]'
         },
-        'chunk_size': 10000,
+        'chunk_size': 100000,
         'num_chunks_per_file': 10
     },
     {
