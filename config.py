@@ -144,8 +144,19 @@ tables_config = [
             'creation_match': 'string',
             'runtime_match': 'string',
             'created_at': 'datetime64[ns]',
-            'updated_at': 'datetime64[ns]',
-            'metadata': 'json'
+            'updated_at': 'datetime64[ns]'
+        },
+        'chunk_size': 10000,
+        'num_chunks_per_file': 10
+    },
+    {
+        'name': 'compiled_contracts_metadata',
+        'primary_key': 'compilation_id',
+        'order_by': 'created_at',
+        'datatypes': {
+            'compilation_id': 'string',
+            'metadata': 'json',
+            'created_at': 'datetime64[ns]'
         },
         'chunk_size': 10000,
         'num_chunks_per_file': 10
