@@ -48,10 +48,57 @@ The script automatically detects existing files in GCS and performs **append-onl
 
 - **First run**: Exports all data from the database
 - **Subsequent runs**:
-  - Finds the newest file in GCS for each table
+  - Finds the newest file in GCS for each table (the file with the highest row range in its name)
   - Downloads it and reads the first row to determine the checkpoint
   - Regenerates the last file completely (in case it was incomplete)
   - Exports only new data that arrived since that checkpoint
+
+### Removal of deleted rows
+
+The export is append-only. So a row that is deleted in the database stays in the older files. To remove such rows, the script can read removal lists before each export.
+
+Set these env vars to turn the removal step on:
+
+- `REMOVAL_BUCKET_NAME`: a private bucket with the removal lists. Without it, the script skips the step.
+- `REMOVAL_PREFIX`: the folder of the lists in that bucket. Default: `parquet-removals`.
+
+A removal list is a JSON file at `{REMOVAL_PREFIX}/pending/{name}.json`:
+
+```json
+{
+  "version": 1,
+  "requestId": "3b241101-e2bb-4255-8caf-4136c566a962",
+  "tables": {
+    "verified_contracts": ["12345"],
+    "contracts": ["0b1c6e2e-7c1a-4a5e-9d0c-2f6f1f0e8a11"],
+    "sources": ["0x9c22ff5f21f0b81b113e63f7db6da94fedef11b2119b4088b89664fb9a3cb658"]
+  }
+}
+```
+
+A key is the value of the `primary_key` column of the table in [config.py](./config.py): integers and UUIDs as text, binary values as `0x` hex. The script ignores a table that is not in the export.
+
+For each table of the lists, the script:
+
+1. reads the key column of the older files and finds the files with a listed row;
+2. writes each of these files again without the rows, with the same schema, row groups, and compression, and uploads it under the same name;
+3. skips the newest file, because the export then writes that file again from the database.
+
+After all tables are done, it moves each list to `{REMOVAL_PREFIX}/done/`. If the step fails, the lists stay in `pending/` and the next run handles them again.
+
+Consequences for users of the dataset:
+
+- An older file can change, and it can then have fewer rows than the range in its name.
+- The newest file of a table is the file with the highest row range in its name. The script does not use the last modified time for this, because the removal step changes the time of an older file.
+
+The service account of the script needs the right to read, create, and delete objects in the removal folder.
+
+Run the tests of the removal step with:
+
+```
+pip install pytest
+python -m pytest tests
+```
 
 ### Debugging
 

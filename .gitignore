@@ -4,3 +4,5 @@ debug.log
 *.log
 .env
 .DS_Store
+__pycache__
+.pytest_cache

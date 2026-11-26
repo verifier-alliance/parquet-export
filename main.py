@@ -6,6 +6,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from dotenv import load_dotenv
 from config import tables_config
+from removal import DEFAULT_REMOVAL_PREFIX, list_table_files, process_removals
 from google.cloud.sql.connector import Connector, IPTypes
 from google.cloud import storage
 import time
@@ -158,7 +159,8 @@ def upload_to_gcs(file_path, bucket_name, object_name):
 
 def get_newest_file_from_gcs(table_name, bucket_name):
     """
-    Find the newest file for a given table in GCS based on last modified timestamp.
+    Find the newest file for a given table in GCS: the file with the highest row range in its name.
+    The last modified timestamp is not used, because the removal step can write an older file again.
     Returns blob_name (full path) or None if no files exist.
     """
     logger.info(f"Searching for newest file in GCS for table: {table_name}")
@@ -167,17 +169,14 @@ def get_newest_file_from_gcs(table_name, bucket_name):
         client = storage.Client()
         bucket = client.bucket(bucket_name)
 
-        # List all blobs in the table's directory (under v2/)
-        prefix = f"v2/{table_name}/"
-        blobs = list(bucket.list_blobs(prefix=prefix))
+        files = list_table_files(bucket, table_name)
 
-        if not blobs:
+        if not files:
             logger.info(f"No existing files found in GCS for table {table_name}")
             return None
 
-        # Find the blob with the latest updated timestamp
-        newest_blob = max(blobs, key=lambda b: b.updated)
-        logger.info(f"Found newest file: {newest_blob.name} (updated: {newest_blob.updated})")
+        newest_blob = files[-1][1]
+        logger.info(f"Found newest file: {newest_blob.name}")
 
         return newest_blob.name
 
@@ -423,6 +422,19 @@ def write_stats_json(engine, bucket_name):
 if __name__ == "__main__":
     logger.info("Creating engine for database")
     engine = create_sqlalchemy_engine()
+
+    # Remove deleted rows from older files first. The export below writes the newest files again.
+    removal_bucket_name = os.getenv('REMOVAL_BUCKET_NAME')
+    if removal_bucket_name:
+        client = storage.Client()
+        process_removals(
+            client.bucket(os.getenv('GCS_BUCKET_NAME')),
+            client.bucket(removal_bucket_name),
+            tables_config,
+            compression,
+            prefix=os.getenv('REMOVAL_PREFIX', DEFAULT_REMOVAL_PREFIX).strip('/'),
+            dry_run=bool(os.getenv('DEBUG')),
+        )
 
     debug_table = os.getenv('DEBUG_TABLE') # To debug a specific table
     if debug_table:
