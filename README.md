@@ -10,6 +10,15 @@ The latest export is publicly available at [https://export.verifieralliance.org]
 
 Please refer to the [VerA docs](https://verifieralliance.org/docs/download) for instructions on how to download and use the Parquet files.
 
+## Tests
+
+Install the dependencies (see [Installation](#installation)) and `pytest`, then run the tests:
+
+```
+pip install pytest
+python -m pytest tests
+```
+
 ## Running the Export Script
 
 ### Requirements
@@ -73,8 +82,6 @@ A removal list has the `primary_key` values of the rows for each table, with bin
   }
 }
 ```
-
-Tests: `pip install pytest && python -m pytest tests`
 
 ### Debugging
 
