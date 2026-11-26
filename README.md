@@ -10,6 +10,15 @@ The latest export is publicly available at [https://export.verifieralliance.org]
 
 Please refer to the [VerA docs](https://verifieralliance.org/docs/download) for instructions on how to download and use the Parquet files.
 
+## Tests
+
+Install the dependencies (see [Installation](#installation)) and `pytest`, then run the tests:
+
+```
+pip install pytest
+python -m pytest tests
+```
+
 ## Running the Export Script
 
 ### Requirements
@@ -48,10 +57,38 @@ The script automatically detects existing files in GCS and performs **append-onl
 
 - **First run**: Exports all data from the database
 - **Subsequent runs**:
-  - Finds the newest file in GCS for each table
+  - Finds the newest file in GCS for each table (the file with the highest row range in its name)
   - Downloads it and reads the first row to determine the checkpoint
   - Regenerates the last file completely (in case it was incomplete)
   - Exports only new data that arrived since that checkpoint
+
+### Removal of deleted rows
+
+The export is append-only, so a row that is deleted in the database stays in the older files. With `REMOVAL_BUCKET_NAME` set, the script removes such rows after each export:
+
+- It reads the removal lists at `{REMOVAL_PREFIX}/pending/*.json` in that private bucket (`REMOVAL_PREFIX` defaults to `parquet-removals`).
+- It writes each older file that has a listed row again without the row, under the same name. So an older file can have fewer rows than the range in its name, and fewer row groups.
+- It moves the handled lists to `{REMOVAL_PREFIX}/done/`.
+
+A removal list has the `primary_key` value (binary values as `0x` hex) and the `created_at` value (UTC with microseconds) of each row. The script removes a row only if both match:
+
+```json
+{
+  "version": 2,
+  "requestId": "3b241101-e2bb-4255-8caf-4136c566a962",
+  "tables": {
+    "verified_contracts": [{ "key": "12345", "createdAt": "2026-01-31T12:00:00.123456Z" }],
+    "sources": [
+      {
+        "key": "0x9c22ff5f21f0b81b113e63f7db6da94fedef11b2119b4088b89664fb9a3cb658",
+        "createdAt": "2026-01-31T12:00:00.123456Z"
+      }
+    ]
+  }
+}
+```
+
+An error in the removal step ends the job with a failure, after the export is done. This includes a list with another format. The lists then stay in `pending/`, and each later run fails in the same way until the cause is fixed.
 
 ### Debugging
 
