@@ -423,19 +423,6 @@ if __name__ == "__main__":
     logger.info("Creating engine for database")
     engine = create_sqlalchemy_engine()
 
-    # Remove deleted rows from older files first. The export below writes the newest files again.
-    removal_bucket_name = os.getenv('REMOVAL_BUCKET_NAME')
-    if removal_bucket_name:
-        client = storage.Client()
-        process_removals(
-            client.bucket(os.getenv('GCS_BUCKET_NAME')),
-            client.bucket(removal_bucket_name),
-            tables_config,
-            compression,
-            prefix=os.getenv('REMOVAL_PREFIX', DEFAULT_REMOVAL_PREFIX).strip('/'),
-            dry_run=bool(os.getenv('DEBUG')),
-        )
-
     debug_table = os.getenv('DEBUG_TABLE') # To debug a specific table
     if debug_table:
         for table_config in tables_config:
@@ -449,3 +436,17 @@ if __name__ == "__main__":
             fetch_and_write(table_config, engine)
 
     write_stats_json(engine, os.getenv('GCS_BUCKET_NAME'))
+
+    # Remove deleted rows from the older files. The export above wrote the newest files again.
+    # An error here ends the job with a failure, after the export is done.
+    removal_bucket_name = os.getenv('REMOVAL_BUCKET_NAME')
+    if removal_bucket_name:
+        client = storage.Client()
+        process_removals(
+            client.bucket(os.getenv('GCS_BUCKET_NAME')),
+            client.bucket(removal_bucket_name),
+            tables_config,
+            compression,
+            prefix=(os.getenv('REMOVAL_PREFIX') or DEFAULT_REMOVAL_PREFIX).strip('/'),
+            dry_run=bool(os.getenv('DEBUG')),
+        )

@@ -64,24 +64,31 @@ The script automatically detects existing files in GCS and performs **append-onl
 
 ### Removal of deleted rows
 
-The export is append-only, so a row that is deleted in the database stays in the older files. With `REMOVAL_BUCKET_NAME` set, the script removes such rows before each export:
+The export is append-only, so a row that is deleted in the database stays in the older files. With `REMOVAL_BUCKET_NAME` set, the script removes such rows after each export:
 
 - It reads the removal lists at `{REMOVAL_PREFIX}/pending/*.json` in that private bucket (`REMOVAL_PREFIX` defaults to `parquet-removals`).
-- It writes each older file that has a listed row again without the row, under the same name. So an older file can have fewer rows than the range in its name.
+- It writes each older file that has a listed row again without the row, under the same name. So an older file can have fewer rows than the range in its name, and fewer row groups.
 - It moves the handled lists to `{REMOVAL_PREFIX}/done/`.
 
-A removal list has the `primary_key` values of the rows for each table, with binary values as `0x` hex:
+A removal list has the `primary_key` value (binary values as `0x` hex) and the `created_at` value (UTC with microseconds) of each row. The script removes a row only if both match:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "requestId": "3b241101-e2bb-4255-8caf-4136c566a962",
   "tables": {
-    "verified_contracts": ["12345"],
-    "sources": ["0x9c22ff5f21f0b81b113e63f7db6da94fedef11b2119b4088b89664fb9a3cb658"]
+    "verified_contracts": [{ "key": "12345", "createdAt": "2026-01-31T12:00:00.123456Z" }],
+    "sources": [
+      {
+        "key": "0x9c22ff5f21f0b81b113e63f7db6da94fedef11b2119b4088b89664fb9a3cb658",
+        "createdAt": "2026-01-31T12:00:00.123456Z"
+      }
+    ]
   }
 }
 ```
+
+An error in the removal step ends the job with a failure, after the export is done. This includes a list with another format. The lists then stay in `pending/`, and each later run fails in the same way until the cause is fixed.
 
 ### Debugging
 

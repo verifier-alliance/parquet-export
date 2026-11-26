@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+from datetime import datetime
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -75,21 +76,40 @@ CONTRACTS = {
     "name": "contracts",
     "primary_key": "id",
     "order_by": "created_at",
-    "datatypes": {"id": "string", "value": "Int64"},
+    "datatypes": {"id": "string", "created_at": "datetime64[ns]"},
 }
 SOURCES = {
     "name": "sources",
     "primary_key": "source_hash",
     "order_by": "created_at",
-    "datatypes": {"source_hash": "object", "content": "string"},
+    "datatypes": {"source_hash": "object", "created_at": "datetime64[ns]"},
 }
 MATCHES = {
     "name": "sourcify_matches",
     "primary_key": "id",
     "order_by": "updated_at",
-    "datatypes": {"id": "Int64", "value": "Int64"},
+    "datatypes": {"id": "Int64", "created_at": "datetime64[ns]"},
 }
 TABLES = [CONTRACTS, SOURCES, MATCHES]
+KEY_TYPES = {"contracts": pa.string(), "sources": pa.binary(), "sourcify_matches": pa.int64()}
+H1, H2, H3, H4, H5 = (bytes([n]) * 32 for n in range(1, 6))
+
+
+def created_at(day):
+    """The createdAt text of a test row. The day is the only difference between rows."""
+    return f"2026-01-{day:02d}T10:20:30.123456Z"
+
+
+def rows(table, *pairs):
+    """A row group of a test table from (key, day) pairs."""
+    config = next(config for config in TABLES if config["name"] == table)
+    times = [datetime(2026, 1, day, 10, 20, 30, 123456) for _, day in pairs]
+    return pa.table(
+        {
+            config["primary_key"]: pa.array([key for key, _ in pairs], KEY_TYPES[table]),
+            "created_at": pa.array(times, pa.timestamp("ns")),
+        }
+    )
 
 
 def write_file(bucket, table, start, end, groups):
@@ -103,26 +123,20 @@ def write_file(bucket, table, start, end, groups):
     return path
 
 
-def contracts(ids):
-    return pa.table({"id": pa.array(ids, pa.string()), "value": pa.array(range(len(ids)), pa.int64())})
-
-
-def matches(ids):
-    return pa.table({"id": pa.array(ids, pa.int64()), "value": pa.array(range(len(ids)), pa.int64())})
-
-
-def sources(hashes):
-    return pa.table({"source_hash": pa.array(hashes, pa.binary()), "content": pa.array(["x"] * len(hashes))})
-
-
 def removal_list(bucket, request_id, tables, prefix="parquet-removals"):
-    bucket.write(
-        f"{prefix}/pending/{request_id}.json",
-        json.dumps({"version": 1, "requestId": request_id, "tables": tables}),
-    )
+    """tables: {table: [(key, day), ...]}"""
+    content = {
+        "version": 2,
+        "requestId": request_id,
+        "tables": {
+            table: [{"key": key, "createdAt": created_at(day)} for key, day in pairs]
+            for table, pairs in tables.items()
+        },
+    }
+    bucket.write(f"{prefix}/pending/{request_id}.json", json.dumps(content))
 
 
-def ids_of(path, column="id"):
+def keys_of(path, column="id"):
     return pq.read_table(path).column(column).to_pylist()
 
 
@@ -145,79 +159,118 @@ def test_parse_start_row():
     assert removal.parse_start_row("v2/x/contracts_sources_0_10.parquet", "contracts") is None
 
 
+def test_parse_created_at_keeps_the_microseconds():
+    assert removal.parse_created_at("1970-01-01T00:00:01.000002Z") == 1000002
+    assert removal.parse_created_at("2026-01-31T12:00:00.123456Z") % 1000000 == 123456
+
+
 def test_newest_file_is_by_row_range_not_by_time(buckets):
     export, _ = buckets
-    write_file(export, "contracts", 10, 20, [contracts(["c"])])
-    write_file(export, "contracts", 0, 10, [contracts(["a"])])
-    write_file(export, "contracts", 100, 110, [contracts(["z"])])
+    write_file(export, "contracts", 10, 20, [rows("contracts", ("c", 3))])
+    write_file(export, "contracts", 0, 10, [rows("contracts", ("a", 1))])
+    write_file(export, "contracts", 100, 110, [rows("contracts", ("z", 9))])
     files = removal.list_table_files(export, "contracts")
     assert [start for start, _ in files] == [0, 10, 100]
 
 
-def test_removes_rows_from_an_older_file_and_keeps_the_layout(buckets):
+def test_removes_rows_from_an_older_file(buckets):
     export, removals = buckets
-    old = write_file(export, "contracts", 0, 4, [contracts(["a", "b"]), contracts(["c", "d"])])
-    untouched = write_file(export, "contracts", 4, 8, [contracts(["e", "f"]), contracts(["g", "h"])])
-    newest = write_file(export, "contracts", 8, 12, [contracts(["i", "b"])])
-    removal_list(removals, "r1", {"contracts": ["b", "c"], "not_exported": ["1"]})
+    old = write_file(export, "contracts", 0, 4, [rows("contracts", ("a", 1), ("b", 2)), rows("contracts", ("c", 3), ("d", 4))])
+    untouched = write_file(export, "contracts", 4, 8, [rows("contracts", ("e", 5), ("f", 6))])
+    newest = write_file(export, "contracts", 8, 12, [rows("contracts", ("i", 9), ("j", 10))])
+    removal_list(removals, "r1", {"contracts": [("b", 2), ("c", 3), ("j", 10)], "not_exported": [("1", 1)]})
 
     assert run(buckets) == 2
 
-    assert ids_of(old) == ["a", "d"]
+    assert keys_of(old) == ["a", "d"]
     rewritten = pq.ParquetFile(old)
     assert rewritten.num_row_groups == 2
-    assert rewritten.schema_arrow.equals(contracts([]).schema)
+    assert rewritten.schema_arrow.equals(rows("contracts").schema)
     assert rewritten.metadata.row_group(0).column(0).compression == "ZSTD"
     # Only the file with the rows is written again. The newest file is for the export.
     assert export.uploads == ["v2/contracts/contracts_0_4.parquet"]
-    assert ids_of(untouched) == ["e", "f", "g", "h"]
-    assert ids_of(newest) == ["i", "b"]
+    assert keys_of(untouched) == ["e", "f"]
+    assert keys_of(newest) == ["i", "j"]
     assert removals.names() == ["parquet-removals/done/r1.json"]
     assert not [name for name in os.listdir(".") if name.startswith("removal_")]
 
 
-def test_binary_keys_are_hex_in_the_list(buckets):
+def test_a_row_group_that_loses_all_rows_is_left_out(buckets):
     export, removals = buckets
-    old = write_file(export, "sources", 0, 2, [sources([b"\x01" * 32, b"\x02" * 32])])
-    write_file(export, "sources", 2, 4, [sources([b"\x03" * 32])])
-    removal_list(removals, "r1", {"sources": ["0x" + "02" * 32]})
+    old = write_file(export, "contracts", 0, 3, [rows("contracts", ("a", 1)), rows("contracts", ("b", 2), ("c", 3))])
+    write_file(export, "contracts", 3, 6, [rows("contracts", ("d", 4))])
+    removal_list(removals, "r1", {"contracts": [("a", 1)]})
 
     assert run(buckets) == 1
-    assert ids_of(old, "source_hash") == [b"\x01" * 32]
+    assert keys_of(old) == ["b", "c"]
+    assert pq.ParquetFile(old).num_row_groups == 1
+
+
+def test_a_row_with_the_same_key_and_another_time_stays(buckets):
+    """The same content was added again after the deletion. The new row is in the database."""
+    export, removals = buckets
+    first = write_file(export, "sources", 0, 2, [rows("sources", (H1, 1), (H2, 2))])
+    write_file(export, "sources", 2, 4, [rows("sources", (H3, 3), (H4, 4))])
+    again = write_file(export, "sources", 4, 6, [rows("sources", (H5, 5), (H2, 6))])
+    write_file(export, "sources", 6, 8, [rows("sources", (b"\x09" * 32, 9))])
+    # The second key is in no older file, so the step cannot stop early.
+    removal_list(removals, "r1", {"sources": [("0x" + H2.hex(), 2), ("0x" + "09" * 32, 9)]})
+
+    assert run(buckets) == 1
+    assert keys_of(first, "source_hash") == [H1]
+    assert keys_of(again, "source_hash") == [H5, H2]
+    assert export.uploads == ["v2/sources/sources_0_2.parquet"]
 
 
 def test_removes_each_copy_of_a_row_of_a_table_that_is_ordered_by_updated_at(buckets):
     export, removals = buckets
-    first = write_file(export, "sourcify_matches", 0, 2, [matches([1, 2])])
-    second = write_file(export, "sourcify_matches", 2, 4, [matches([2, 3])])
-    write_file(export, "sourcify_matches", 4, 6, [matches([4])])
-    removal_list(removals, "r1", {"sourcify_matches": ["2"]})
+    first = write_file(export, "sourcify_matches", 0, 2, [rows("sourcify_matches", (1, 1), (2, 2))])
+    second = write_file(export, "sourcify_matches", 2, 4, [rows("sourcify_matches", (2, 2), (3, 3))])
+    write_file(export, "sourcify_matches", 4, 6, [rows("sourcify_matches", (4, 4))])
+    removal_list(removals, "r1", {"sourcify_matches": [("2", 2)]})
 
     assert run(buckets) == 2
-    assert ids_of(first) == [1]
-    assert ids_of(second) == [3]
+    assert keys_of(first) == [1]
+    assert keys_of(second) == [3]
 
 
-def test_merges_lists_and_stops_when_each_unique_key_is_found(buckets):
+def test_reads_only_row_groups_that_can_have_a_row(buckets, monkeypatch):
     export, removals = buckets
-    write_file(export, "contracts", 0, 2, [contracts(["a", "b"])])
-    second = write_file(export, "contracts", 2, 4, [contracts(["c", "d"])])
-    write_file(export, "contracts", 4, 6, [contracts(["e"])])
-    removal_list(removals, "r1", {"contracts": ["a"]})
-    removal_list(removals, "r2", {"contracts": ["b"]})
-    # Not a Parquet file. The step must not read it, because both keys are in the first file.
-    with open(second, "w") as file:
-        file.write("not parquet")
+    write_file(export, "contracts", 0, 4, [rows("contracts", ("a", 1), ("b", 2)), rows("contracts", ("c", 3), ("d", 4))])
+    write_file(export, "contracts", 4, 6, [rows("contracts", ("e", 5), ("f", 6))])
+    write_file(export, "contracts", 6, 8, [rows("contracts", ("g", 7))])
+    removal_list(removals, "r1", {"contracts": [("d", 4)]})
+    read = []
+    original = pq.ParquetFile.read_row_groups
+
+    def record(self, row_groups, **kwargs):
+        read.append((list(row_groups), kwargs.get("columns")))
+        return original(self, row_groups, **kwargs)
+
+    monkeypatch.setattr(pq.ParquetFile, "read_row_groups", record)
+    assert run(buckets) == 1
+    # One row group of the first file, two columns. The second file is not opened.
+    assert read == [([1], ["id", "created_at"])]
+
+
+def test_merges_lists(buckets):
+    export, removals = buckets
+    old = write_file(export, "contracts", 0, 2, [rows("contracts", ("a", 1), ("b", 2))])
+    write_file(export, "contracts", 2, 4, [rows("contracts", ("c", 3))])
+    removal_list(removals, "r1", {"contracts": [("a", 1)]})
+    removal_list(removals, "r2", {"contracts": [("b", 2)]})
 
     assert run(buckets) == 2
+    assert keys_of(old) == []
+    assert pq.ParquetFile(old).schema_arrow.equals(rows("contracts").schema)
     assert removals.names() == ["parquet-removals/done/r1.json", "parquet-removals/done/r2.json"]
 
 
-def test_a_key_that_no_older_file_has_is_not_an_error(buckets):
+def test_a_row_that_no_older_file_has_is_not_an_error(buckets):
     export, removals = buckets
-    write_file(export, "contracts", 0, 2, [contracts(["a", "b"])])
-    write_file(export, "contracts", 2, 4, [contracts(["c"])])
-    removal_list(removals, "r1", {"contracts": ["c", "missing"]})
+    write_file(export, "contracts", 0, 2, [rows("contracts", ("a", 1), ("b", 2))])
+    write_file(export, "contracts", 2, 4, [rows("contracts", ("c", 3))])
+    removal_list(removals, "r1", {"contracts": [("c", 3), ("missing", 2)]})
 
     assert run(buckets) == 0
     assert export.uploads == []
@@ -226,20 +279,20 @@ def test_a_key_that_no_older_file_has_is_not_an_error(buckets):
 
 def test_dry_run_changes_nothing(buckets):
     export, removals = buckets
-    old = write_file(export, "contracts", 0, 2, [contracts(["a", "b"])])
-    write_file(export, "contracts", 2, 4, [contracts(["c"])])
-    removal_list(removals, "r1", {"contracts": ["a"]})
+    old = write_file(export, "contracts", 0, 2, [rows("contracts", ("a", 1), ("b", 2))])
+    write_file(export, "contracts", 2, 4, [rows("contracts", ("c", 3))])
+    removal_list(removals, "r1", {"contracts": [("a", 1)]})
 
     assert run(buckets, dry_run=True) == 1
-    assert ids_of(old) == ["a", "b"]
+    assert keys_of(old) == ["a", "b"]
     assert removals.names() == ["parquet-removals/pending/r1.json"]
 
 
 def test_a_failure_leaves_the_lists_pending(buckets, monkeypatch):
     export, removals = buckets
-    old = write_file(export, "contracts", 0, 2, [contracts(["a", "b"])])
-    write_file(export, "contracts", 2, 4, [contracts(["c"])])
-    removal_list(removals, "r1", {"contracts": ["a"]})
+    old = write_file(export, "contracts", 0, 2, [rows("contracts", ("a", 1), ("b", 2))])
+    write_file(export, "contracts", 2, 4, [rows("contracts", ("c", 3))])
+    removal_list(removals, "r1", {"contracts": [("a", 1)]})
     download = FakeBlob.download_to_filename
 
     def download_and_change(self, filename):
@@ -250,20 +303,50 @@ def test_a_failure_leaves_the_lists_pending(buckets, monkeypatch):
     monkeypatch.setattr(FakeBlob, "download_to_filename", download_and_change)
     with pytest.raises(RuntimeError):
         run(buckets)
-    assert ids_of(old) == ["a", "b"]
+    assert keys_of(old) == ["a", "b"]
     assert removals.names() == ["parquet-removals/pending/r1.json"]
     assert not [name for name in os.listdir(".") if name.startswith("removal_")]
 
 
-def test_uses_the_prefix_and_refuses_an_unknown_list(buckets):
+def test_uses_the_prefix(buckets):
     export, removals = buckets
-    write_file(export, "contracts", 0, 2, [contracts(["a"])])
-    removal_list(removals, "r1", {"contracts": ["a"]}, prefix="parquet-removals/alliance")
+    write_file(export, "contracts", 0, 2, [rows("contracts", ("a", 1))])
+    removal_list(removals, "r1", {"contracts": [("a", 1)]}, prefix="parquet-removals/alliance")
     assert run(buckets) == 0
     assert removals.names() == ["parquet-removals/alliance/pending/r1.json"]
     assert run(buckets, prefix="parquet-removals/alliance") == 0
     assert removals.names() == ["parquet-removals/alliance/done/r1.json"]
 
-    removals.write("parquet-removals/pending/bad.json", json.dumps({"version": 2}))
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        {"version": 1, "tables": {"contracts": ["a"]}},
+        {"version": 2},
+        {"version": 2, "tables": []},
+        # One string in place of the array. Its characters must not become keys.
+        {"version": 2, "tables": {"sourcify_matches": "2345"}},
+        {"version": 2, "tables": {"sourcify_matches": {"2": 1}}},
+        {"version": 2, "tables": {"contracts": ["a"]}},
+        {"version": 2, "tables": {"contracts": [{"key": "a"}]}},
+        {"version": 2, "tables": {"contracts": [{"key": 1, "createdAt": "2026-01-01T10:20:30.123456Z"}]}},
+        {"version": 2, "tables": {"contracts": [{"key": "a", "createdAt": "2026-01-01T10:20:30Z"}]}},
+        {"version": 2, "tables": {"contracts": [{"key": "a", "createdAt": "2026-01-01T10:20:30.123456+01:00"}]}},
+        [],
+    ],
+)
+def test_refuses_a_list_with_another_format_and_removes_nothing(buckets, content):
+    export, removals = buckets
+    old = write_file(export, "sourcify_matches", 0, 6, [rows("sourcify_matches", *[(n, n) for n in range(1, 7)])])
+    write_file(export, "sourcify_matches", 6, 8, [rows("sourcify_matches", (7, 7))])
+    one = write_file(export, "contracts", 0, 2, [rows("contracts", ("a", 1), ("b", 2))])
+    write_file(export, "contracts", 2, 4, [rows("contracts", ("c", 3))])
+    # A valid list next to the wrong list. The step handles all lists or no list.
+    removal_list(removals, "good", {"contracts": [("a", 1)]})
+    removals.write("parquet-removals/pending/wrong.json", json.dumps(content))
+
     with pytest.raises(ValueError):
         run(buckets)
+    assert keys_of(old) == [1, 2, 3, 4, 5, 6]
+    assert keys_of(one) == ["a", "b"]
+    assert sorted(removals.names()) == ["parquet-removals/pending/good.json", "parquet-removals/pending/wrong.json"]
